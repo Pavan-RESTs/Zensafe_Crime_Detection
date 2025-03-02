@@ -62,7 +62,7 @@ def Video2ImgH5_single(video_path, h5_path, segment_len=16, max_vid_len=10000000
             vid_len = int(vc.get(cv2.CAP_PROP_FRAME_COUNT))
             vid_len = min(vid_len, max_vid_len)  # Limit video length to max_vid_len
             vidi = video_path.split('\\')[-1]
-            print(f"Processing video {vidi} with {vid_len} frames.")
+            print(f">>> Processing video {vidi} with {vid_len} frames.")
             
             # Process the video in segments of length `segment_len`
             for i in range(int(vid_len // segment_len)):

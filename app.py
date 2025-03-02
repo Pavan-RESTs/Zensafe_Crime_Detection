@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
 import os
+import pickle
 from werkzeug.utils import secure_filename
 from pymongo import MongoClient
 import requests
@@ -9,7 +10,7 @@ app = Flask(__name__)
 
 
 mongo_uri = "mongodb+srv://diva:divakar2004@divacluster.4zroa.mongodb.net/UrbanGuard"
-print("--> Connecting to MongoDB...")
+print("--> Connecting to MongoDB")
 client = MongoClient(mongo_uri)
 db = client["UrbanGuard"]
 alerts_collection = db["alerts"]
@@ -21,16 +22,35 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 
-def detect_anomaly(video_path):
-    """
-    Simulate anomaly detection logic.
-    Replace this placeholder with actual ML model logic.
-    """
+def detect_anomaly(video_path, oversampledCrop):
+   
     input_video_path = video_path
 
-    pred = main(input_video_path)
-    if (pred == 1):
+    pred = main(video_path=input_video_path, oversampledCrop=oversampledCrop, show_plot=True)
+    if (pred):
+        # ngrok
+        url = "https://d381-2409-40f2-302-5596-7087-802f-4f63-4390.ngrok-free.app/api/mail/send-resident-alert"
+        response = requests.post(url=url)
+   
         return True
+    return False
+
+
+def detect_anomaly2(video_path, toggle):
+   
+    input_video_path = video_path
+
+    pred = main(video_path=input_video_path, oversampledCrop='10_crop', show_plot=True)
+    if (toggle):
+        
+       
+        # # ngrok
+        url = "https://d381-2409-40f2-302-5596-7087-802f-4f63-4390.ngrok-free.app/api/mail/send-resident-alert"
+        response = requests.post(url=url)
+       
+        print("Anomaly detected: ", toggle)
+        return True
+    print("Anomaly detected: ", toggle)
     return False
 
 
@@ -49,7 +69,8 @@ def upload_file():
     file.save(file_path)  
     
     
-    url = f"http://192.168.184.53:5005/uploads/{filename}" 
+    #Change URL Here!
+    url = f"http://192.168.144.53:5005/uploads/{filename}" 
     return jsonify({'message': 'File uploaded successfully', 'url': url}), 200
 
 
@@ -59,10 +80,31 @@ def get_file(filename):
     print(f"Request to fetch file: {filename}")
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
+@app.route('/t', methods=['GET'])
+def toggle():
+    file_path = r'configs\binary.pickle'
 
+    try:
+        # Read the current toggle state from the file
+        with open(file_path, 'rb') as file:
+            toggle = pickle.load(file)
 
-@app.route('/analyze', methods=['POST'])
-def analyze_video():
+        # Toggle the state
+        toggle = not toggle
+        # Write the new state back to the file
+        with open(file_path, 'wb') as file:
+            pickle.dump(toggle, file)
+
+        return jsonify({'message': toggle})
+
+    except FileNotFoundError:
+        return jsonify({'error': 'File not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    
+@app.route('/analyze2', methods=['POST'])
+def analyze_video2():
     print("--> Received a request")
 
     
@@ -78,7 +120,32 @@ def analyze_video():
 
     
     print(">>> Performing anomaly detection")
-    anomaly_detected = detect_anomaly(video_path)
+    with open(r'configs\binary.pickle', 'rb') as file:
+        toggle = pickle.load(file)
+    anomaly_detected = detect_anomaly2(video_path, toggle)
+    
+    return jsonify({'anomaly': anomaly_detected})
+
+
+@app.route('/analyze', methods=['POST'])
+def analyze_video():
+    print("--> Received a request")
+
+    
+    if 'video' not in request.files:
+        print("No video file provided in the request.")
+        return jsonify({'error': 'No video file provided'}), 400
+
+    
+    video = request.files['video']
+    oversampledCrop = request.form['oversampledCrop']
+    video_path = os.path.join('./uploaded_videos', video.filename)
+    os.makedirs('./uploaded_videos', exist_ok=True)
+    video.save(video_path)
+
+    
+    print(">>> Performing anomaly detection")
+    anomaly_detected = detect_anomaly(video_path, oversampledCrop)
     print(">>> Anomaly detected: ", anomaly_detected)
 
     
@@ -110,7 +177,8 @@ def analyze_video():
 
 def upload_video_to_localhost(file_path):
     """Uploads a video to the local Flask server and returns the shareable URL."""
-    url = 'http://192.168.184.53:5005/upload' 
+    #Change URL Here!
+    url = 'http://192.168.144.53:5005/upload' 
     try:
         with open(file_path, 'rb') as file:
             files = {'file': file}
@@ -125,5 +193,5 @@ def upload_video_to_localhost(file_path):
 
 
 if __name__ == '__main__':
-    print("--> Starting Flask server...")
-    app.run(host='0.0.0.0', port=5005, debug=False)
+    print("--> Starting Flask server")
+    app.run(host='0.0.0.0', port=5005, debug=True)

@@ -1,4 +1,5 @@
 from sklearn import metrics
+import pickle
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -138,6 +139,13 @@ def cal_pAUC(scores,labels):
     sum_pred_p=np.sum(scores[labels.astype(bool)])
     sum_pred_n=np.sum(scores[(1-labels).astype(bool)])
     return 0.5*(sum_pred_p/sum_gt_p-sum_pred_n/sum_gt_n+1)
+
+def cal_bcla(oversampledCrop):
+    bcla = 0
+    with open('configs\sampling_configuration.pickle', 'rb') as file:
+        obj = pickle.load(file)
+    bcla = obj[oversampledCrop]
+    return bcla
 
 def eval_each_part(labels_dict,scores_dict,logger=None):
     map = 0

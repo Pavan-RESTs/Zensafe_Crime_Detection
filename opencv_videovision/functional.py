@@ -1,6 +1,3 @@
-########################################################################
-##  This part is from https://github.com/jbohnslav/opencv_transforms  ##
-########################################################################
 import torch
 import math
 import random

@@ -13,10 +13,12 @@ import numpy as np
 import os
 from tqdm import tqdm
 import models
-from apex import amp
 from scipy.ndimage import gaussian_filter1d
+from utils.eval_utils import cal_bcla
 import matplotlib.pyplot as plt
-
+import sys
+import io
+from contextlib import redirect_stdout
 
 class I3D_Inference(Dataset):
     def __init__(self, h5_file, segment_len, height=256, width=340, crop_size=224):
@@ -56,6 +58,7 @@ class I3D_Inference(Dataset):
         frames = self.decode_imgs(frames)
         return frames
 
+# Configuration
 MODEL_TYPE = 'UCF_I3D'  
 EXPAND_K = 8
 GPUS = '0'
@@ -66,7 +69,7 @@ LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 5e-4
 TEST_TEN_CROP = False
 VIS_UCF = False
-MODEL_CHECKPOINT_PATH = r"ckpts\UCF_I3D_AUC_0.8230.pth"
+MODEL_CHECKPOINT_PATH = r"ckpts\UCF_I3D_AUC_0.85989.pth"
 h5_path = r"./temp_h5/temp.h5"
 
 os.environ['CUDA_VISIBLE_DEVICES'] = GPUS
@@ -78,7 +81,7 @@ def load_model(model, state_dict):
         new_dict[key[7:]] = value
     model.load_state_dict(new_dict)
 
-def load_model_dataset(video_path):
+def load_model_dataset(video_path, oversampledCrop):
     Video2ImgH5_single(video_path, h5_path)
     model = getattr(models, 'I3D_SGA_STD')(
         dropout_rate=DROPOUT_RATE,
@@ -87,58 +90,53 @@ def load_model_dataset(video_path):
         freeze_blocks=None
     ).cuda().eval()
     
-    opt_level = 'O1'
-    amp.init(allow_banned=True)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.999)
     )
-    model, optimizer = amp.initialize(
-        model, optimizer, opt_level=opt_level, keep_batchnorm_fp32=None
-    )
+    
+    bcla = cal_bcla(oversampledCrop)
+
+    # Using PyTorch's native AMP
+    scaler = torch.cuda.amp.GradScaler()
 
     dataset = I3D_Inference(h5_path, SEGMENT_LEN)
     load_model(model, torch.load(MODEL_CHECKPOINT_PATH)['model'])
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
-    return model, dataloader
+    return model, dataloader, bcla
 
 def infer(model, dataloader):
     model.eval()
     all_scores = []
     total_scores = []
+    
     with torch.no_grad():
-        for frames in tqdm(dataloader):
-            frames = frames.float().contiguous().view([-1, 3, frames.shape[-3], frames.shape[-2], frames.shape[-1]]).cuda()
-            scores, _ = model(frames)[:2]
-            for score in scores:
-                score = score.float().squeeze()[1].detach().cpu().item()
-                score = [score] * SEGMENT_LEN
-                total_scores.extend(score)
+        with torch.cuda.amp.autocast():  # Enable automatic mixed precision
+            for frames in tqdm(dataloader): # add tqdm if necessary
+                frames = frames.float().contiguous().view([-1, 3, frames.shape[-3], frames.shape[-2], frames.shape[-1]]).cuda()
+                scores, _ = model(frames)[:2]
+                for score in scores:
+                    score = score.float().squeeze()[1].detach().cpu().item()
+                    score = [score] * SEGMENT_LEN
+                    total_scores.extend(score)
     return total_scores
 
-
-
 def play_video_with_plot(video_path, scores, smoothened_scores):
-    
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    
     
     plt.style.use('dark_background')
     fig = plt.figure(figsize=(12, 8))
     gs = fig.add_gridspec(2, 1, height_ratios=[2, 1], hspace=0.3)
     
-    
     ax_video = fig.add_subplot(gs[0])
     ax_video.axis('off')
     video_img = ax_video.imshow(np.zeros((256, 340, 3), dtype=np.uint8))
     
-    
     ax_plot = fig.add_subplot(gs[1])
     ax_plot.set_facecolor('#1f1f1f')
     fig.patch.set_facecolor('#121212')
-    
     
     ax_plot.grid(True, linestyle='--', alpha=0.3)
     ax_plot.set_xlim(0, len(scores))
@@ -148,11 +146,9 @@ def play_video_with_plot(video_path, scores, smoothened_scores):
     ax_plot.set_xlabel("Frame Index", color='white', fontsize=10)
     ax_plot.set_ylabel("Anomaly Score", color='white', fontsize=10)
     
-    
     ax_plot.tick_params(colors='white')
     for spine in ax_plot.spines.values():
         spine.set_color('white')
-    
     
     original_line, = ax_plot.plot(range(len(scores)), scores, 
                                 label='Original', linestyle='--', 
@@ -161,30 +157,22 @@ def play_video_with_plot(video_path, scores, smoothened_scores):
                                  label='Smoothened', color='#50fa7b', 
                                  linewidth=2)
     
-    
     threshold = np.mean(smoothened_scores) + 2 * np.std(smoothened_scores)
-    threshold_line = ax_plot.axhline(y=threshold, color='#ff5555', 
-                                   linestyle='--', alpha=0.8, 
-                                   label=f'Threshold ({threshold:.3f})')
     
     
     current_frame_line = ax_plot.axvline(x=0, color='#ff79c6', 
                                        linestyle='-', alpha=0.8)
-    
     
     legend = ax_plot.legend(loc='upper right', facecolor='#282a36', 
                            edgecolor='#44475a', framealpha=0.7)
     for text in legend.get_texts():
         text.set_color('white')
     
-    
     score_text = ax_plot.text(0.01, 0.85, '', transform=ax_plot.transAxes,
                              color='white', fontsize=10, 
                              backgroundcolor='#282a36')
     score_text.set_bbox(dict(facecolor='#282a36', alpha=0.7, edgecolor='none'))
 
-    
-    
     paused = False
     current_frame = 0
     skip_frames = int(fps)  
@@ -207,7 +195,6 @@ def play_video_with_plot(video_path, scores, smoothened_scores):
             
     fig.canvas.mpl_connect('key_press_event', on_key_press)
     
-    
     def update(frame):
         nonlocal current_frame
         if not paused:
@@ -218,17 +205,13 @@ def play_video_with_plot(video_path, scores, smoothened_scores):
                 ret, frame = cap.read()
             
             if ret:
-                
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 video_img.set_array(frame)
                 
-                
                 current_frame_line.set_xdata([current_frame, current_frame])
-                
                 
                 current_score = smoothened_scores[min(current_frame, len(smoothened_scores)-1)]
                 score_text.set_text(f'Current Score: {current_score:.3f}')
-                
                 
                 if current_score > threshold:
                     current_frame_line.set_color('#ff5555')
@@ -237,35 +220,39 @@ def play_video_with_plot(video_path, scores, smoothened_scores):
                 
                 current_frame += 1
                 
-                
                 if current_frame >= len(scores):
                     current_frame = 0
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         
         return [video_img, current_frame_line, score_text]
     
-    
     ani = animation.FuncAnimation(
         fig, update, interval=1000/fps,
         blit=True, cache_frame_data=False
     )
-    
-    plt.show()
+
+    plt.show(block=True)
     cap.release()
 
-def main(video_path):
+def main(video_path, oversampledCrop, show_plot=False):
     if os.path.isfile(h5_path):
-        print("Yes")
         os.remove(h5_path)
-    model, dataloader = load_model_dataset(video_path)
+    model, dataloader, bcla = load_model_dataset(video_path, oversampledCrop)
     scores = infer(model, dataloader)
-    print("Inference complete.")
+    print(">>> Inference complete")
     smoothened_scores = gaussian_filter1d(scores, sigma=4)
-    play_video_with_plot(video_path, scores, smoothened_scores)
+    if show_plot:
+        play_video_with_plot(video_path, scores, smoothened_scores)
    
     os.remove(h5_path)
-    return scores
+    return bcla
     
-    
-if __name__ == '__main__':
-    main(r"C:\Users\pavan\StudioProjects\Unisys_Innovation_Program\Sample_videos\sam1.mp4")
+def buildFileName(video_file_path):
+    import datetime
+    timer = datetime.datetime.now().strftime("%d-%m-%Y_%H-%M")
+    video_file_name = video_file_path.split('\\')[-1].split('.')[0]
+    video_file_name = video_file_name + '_' + timer + '.mp4'
+    f = datetime.datetime.now().strftime("%d-%m-%Y_%H-%M")
+    return video_file_name
+
+main(r"videos_for_demo\chain_snatch.mp4", "10_crop", True)
